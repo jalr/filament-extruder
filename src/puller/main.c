@@ -2,7 +2,8 @@
 
 #include <avr/io.h>
 #include <avr/pgmspace.h>
-#include <avr/signal.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
 
 #include "can.h"
 #include "uart.h"
@@ -10,6 +11,71 @@
 #define UART_BAUD_RATE 115200
 
 #define F_CPU 8000000UL
+
+#define PIN(x) (*(&x - 2)) // Address Of Data Direction Register Of Port x 
+#define DDR(x) (*(&x - 1)) // Address Of Input Register Of Port x
+
+/*
+ *
+ * PIN MAPPING:
+ *  2	INT0		MCP2515 INT
+ *  5	PD5			Display STROBE
+ *  6	PD6			Display DATA
+ *  7	PD7			Display CLOCK
+ *  9	PB1 (OC1A)  A4988 STEP
+ * 10	SS			MCP2515 CS
+ * 11	MOSI		MCP2515 SI
+ * 12	MISO		MCP2515 SO
+ * 13	SCK			MCP2515 SCK
+ * A0	PC0			Encoder Button
+ * A1	PC1			Encoder PH A
+ * A2	PC2			Encoder PH B
+ * A3   PC3         A4988 ENABLE
+ * 
+ */
+
+#define DPY_PORT          PORTD
+#define DPY_STROBE        PD5
+#define DPY_DATA          PD6
+#define DPY_CLOCK         PD7
+
+// If you change STEPPER_STEP, you have to change Timer/Counter code as well
+#define STEPPER_STEP_PORT PORTB
+#define STEPPER_STEP      PB1 
+
+#define STEPPER_EN_PORT    PORTC
+#define STEPPER_EN         PC3
+
+#define ENC_PORT          PORTC
+#define ENC_BUTTON        PC0
+#define ENC_PHASEA        PC1
+#define ENC_PHASEB        PC2
+
+#define SEG_A             0x80
+#define SEG_B             0x40
+#define SEG_C             0x20
+#define SEG_D             0x10
+#define SEG_E             0x08
+#define SEG_F             0x04
+#define SEG_G             0x02
+#define SEG_DP            0x01
+
+static const uint8_t PROGMEM sevensegment_table[] = {
+	SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F, // 0
+	SEG_B | SEG_C, // 1
+	SEG_A | SEG_B | SEG_D | SEG_E | SEG_G, // 2
+	SEG_A | SEG_B | SEG_C | SEG_D | SEG_G, // 3
+	SEG_B | SEG_C | SEG_F | SEG_G, // 4
+	SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, // 5
+	SEG_A | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, // 6
+	SEG_A | SEG_B | SEG_C | SEG_F, // 7
+	SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, // 8
+	SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G // 9
+};
+
+//pgm_read_byte(&sevensegment_table[7])
+
+
 
 // -----------------------------------------------------------------------------
 /** Set filters and masks.
@@ -115,9 +181,33 @@ int main(void)
 	uart_puts_P("sending message");
 	can_send_message(&msg);
 	uart_puts_P("message sent");
-	
-	while (1)
-	{
+
+	STEPPER_EN_PORT |= (1<<STEPPER_EN); // Disable Stepper Driver
+
+	DDR(STEPPER_STEP_PORT) |= (1<<STEPPER_STEP);
+	DDR(STEPPER_EN_PORT) |= (1<<STEPPER_EN);
+	DDR(DPY_PORT) |= (1<<DPY_STROBE) | (1<<DPY_DATA) | (1<<DPY_CLOCK);
+
+	/*
+	TCCR1A = (1<<COM1A0); //Toggle OC1A on Compare Match.
+	TCCR1A |= (1<<WGM12); // CTC Mode
+	*/
+	//TCCR1A = (1<<COM1A1) | (1<<COM1A0); // Set OC1A on Compare Match, clear OC1A at BOTTOM (inverting mode)
+	TCCR1A = (1<<COM1A0); // Toggle OC1A on Compare Match
+
+	TCCR1A |= (1<<WGM11) | (1<<WGM10); // Fast PWM, TOP=OCR1A
+	TCCR1B |= (1<<WGM13) | (1<<WGM12);
+
+
+	TCCR1B |= (1<<CS10); // Prescaler 1
+	//TCCR1B |= (1<<CS11); // Prescaler 8
+	//TCCR1B |= (1<<CS11) | (1<<CS10); // Prescaler 64
+	//TCCR1B |= (1<<CS12); // Prescaler 256
+	//TCCR1B |= (1<<CS12) | (1<<CS10); // Prescaler 1024
+
+	OCR1A = 32768;
+
+	for(;;) {
 		// Check if a new messag was received
 		if (can_check_message())
 		{
@@ -128,6 +218,37 @@ int main(void)
 			uart_puts_P("reading message");
 			if (can_get_message(&msg))
 			{
+				if (msg.id == 42) {
+					OCR1A = msg.data[0]<<8;
+					OCR1A += msg.data[1];
+				}
+				else if (msg.id == 43) {
+					if (msg.data[0] == 1) {
+						STEPPER_EN_PORT &= ~(1<<STEPPER_EN);
+					} else if (msg.data[0] == 0) {
+						STEPPER_EN_PORT |= (1<<STEPPER_EN);
+					}
+				}
+				else if (msg.id == 44) {
+					for (uint8_t by=0; by<4; by++) {
+						uint8_t digit = pgm_read_byte(&sevensegment_table[msg.data[by]]);
+						for (uint8_t bi=0; bi<8; bi++) {
+							if (digit & (1<<bi)) {
+								DPY_PORT |= (1<<DPY_DATA);	
+							} else {
+								DPY_PORT &= ~(1<<DPY_DATA);
+							}
+							_delay_us(2);
+							DPY_PORT |= (1<<DPY_CLOCK);
+							_delay_us(2);
+							DPY_PORT &= ~(1<<DPY_CLOCK);
+						}
+					}
+					DPY_PORT |= (1<<DPY_STROBE);
+					_delay_us(2);
+					DPY_PORT &= ~(1<<DPY_STROBE);
+					_delay_us(2);
+				}
 				// If we received a message resend it with a different id
 				msg.id += 10;
 				
@@ -138,6 +259,4 @@ int main(void)
 			}
 		}
 	}
-	
-	return 0;
 }
