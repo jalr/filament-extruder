@@ -4,7 +4,7 @@ dummy = 0.1;
 $fn = 200;
 
 
-
+/*
 color("brown") {
 	for(z=[0,width-thickness]) {
 		translate([0,0,z]) {
@@ -23,11 +23,15 @@ for(x=[105,270]) {
 	}
 }
 
+
 for(m=[0,1]) {
 	for(n=[0,1]) {
 		translate([117.5+m*165,270,n*(width-thickness/2)+(1-n)*thickness/2]) mirror([0,0,1-n]) rotate([90,90,180])  slider();
 	}
 }
+
+*/
+spring();
 
 module slider() {
 	// thickness of side part
@@ -87,5 +91,25 @@ module wheel() {
 			}
 			translate([0,0,-60/2-dummy]) cylinder(r=20/2, h=60+2*dummy);
 		}
+	}
+}
+
+module spring() {
+	x=100;
+	y=20;
+	w=19;
+	t=3;
+	dummy=0.1;
+	for (n=[-1,1]) {
+		translate([n*(x/2-t),0,0]) cylinder(r=t, h=w);
+	}
+	difference() {
+		scale([x/2-0.5*t,y]) cylinder(r=1, h=w, $fn=100);
+		translate([0,0,-dummy]) scale([x/2-1.5*t,y-t]) cylinder(r=1, h=w+2*dummy);
+		translate([-x/2,-y-dummy,-dummy]) cube([x,y+dummy,w+2*dummy]);
+	}
+	translate([0,y+5-t,w/2]) rotate([90,0,0]) difference() {
+		cylinder(r=9/2+t, h=5);
+		translate([0,0,-t]) cylinder(r=9/2, h=5);
 	}
 }
