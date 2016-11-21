@@ -82,6 +82,7 @@ OBJDIR = build
 # List C source files here. (C dependencies are automatically generated.)
 SRC = $(TARGET).c 
 SRC += uart.c
+SRC += encoder.c
 
 
 # List C++ source files here. (C dependencies are automatically generated.)

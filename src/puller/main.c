@@ -5,60 +5,11 @@
 #include <avr/interrupt.h>
 #include <util/delay.h>
 
+#include "main.h"
 #include "can.h"
 #include "uart.h"
 
-#define UART_BAUD_RATE 115200
-
-#define F_CPU 8000000UL
-
-#define PIN(x) (*(&x - 2)) // Address Of Data Direction Register Of Port x 
-#define DDR(x) (*(&x - 1)) // Address Of Input Register Of Port x
-
-/*
- *
- * PIN MAPPING:
- *  2	INT0		MCP2515 INT
- *  5	PD5			Display STROBE
- *  6	PD6			Display DATA
- *  7	PD7			Display CLOCK
- *  9	PB1 (OC1A)  A4988 STEP
- * 10	SS			MCP2515 CS
- * 11	MOSI		MCP2515 SI
- * 12	MISO		MCP2515 SO
- * 13	SCK			MCP2515 SCK
- * A0	PC0			Encoder Button
- * A1	PC1			Encoder PH A
- * A2	PC2			Encoder PH B
- * A3   PC3         A4988 ENABLE
- * 
- */
-
-#define DPY_PORT          PORTD
-#define DPY_STROBE        PD5
-#define DPY_DATA          PD6
-#define DPY_CLOCK         PD7
-
-// If you change STEPPER_STEP, you have to change Timer/Counter code as well
-#define STEPPER_STEP_PORT PORTB
-#define STEPPER_STEP      PB1 
-
-#define STEPPER_EN_PORT    PORTC
-#define STEPPER_EN         PC3
-
-#define ENC_PORT          PORTC
-#define ENC_BUTTON        PC0
-#define ENC_PHASEA        PC1
-#define ENC_PHASEB        PC2
-
-#define SEG_A             0x80
-#define SEG_B             0x40
-#define SEG_C             0x20
-#define SEG_D             0x10
-#define SEG_E             0x08
-#define SEG_F             0x04
-#define SEG_G             0x02
-#define SEG_DP            0x01
+#include "encoder.h"
 
 static const uint8_t PROGMEM sevensegment_table[] = {
 	SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F, // 0
@@ -72,9 +23,6 @@ static const uint8_t PROGMEM sevensegment_table[] = {
 	SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, // 8
 	SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G // 9
 };
-
-//pgm_read_byte(&sevensegment_table[7])
-
 
 
 // -----------------------------------------------------------------------------
@@ -129,8 +77,7 @@ static const uint8_t PROGMEM sevensegment_table[] = {
  * If you want to receive both 11 and 29 bit identifiers, set your filters
  * and masks as follows:
  */
-const uint8_t can_filter[] PROGMEM = 
-{
+const uint8_t can_filter[] PROGMEM = {
 	// Group 0
 	MCP2515_FILTER(0),				// Filter 0
 	MCP2515_FILTER(0),				// Filter 1
@@ -146,41 +93,77 @@ const uint8_t can_filter[] PROGMEM =
 };
 // You can receive 11 bit identifiers with either group 0 or 1.
 
+const uint16_t const exp10_table [] PROGMEM = {
+	1ul, // 10^0
+	10ul, // 10^1
+	100ul, // 10^2
+	1000ul, // 10^3
+	10000ul, // 10^4
+};
+
+
+void displayNumber(uint16_t number) {
+	// calculate digits
+	uint16_t multiplier;
+	uint8_t digit[NUMBER_OF_DIGITS];
+	for (uint8_t digitCounter=NUMBER_OF_DIGITS; digitCounter>0; digitCounter--) {
+		switch (digitCounter-1) {
+			case 3:
+				multiplier = 1000;
+				break;
+			case 2:
+				multiplier = 100;
+				break;
+			case 1:
+				multiplier = 10;
+				break;
+			case 0:
+				multiplier = 1;
+				break;
+		}
+		digit[digitCounter-1] = 0;
+		while (number >= multiplier) {
+			digit[digitCounter-1]++;
+			number -= multiplier;
+		}
+	}
+	
+	// send digits to display
+	#if (DIGIT_ORDER == 1)
+		for (int8_t segmentPos=0; segmentPos<NUMBER_OF_DIGITS; segmentPos++) {
+	#else
+		for (int8_t segmentPos=NUMBER_OF_DIGITS-1; segmentPos>=0; segmentPos--) {
+	#endif
+		uint8_t segments = pgm_read_byte(&sevensegment_table[digit[segmentPos]]);
+		for (uint8_t segmentBit=0; segmentBit<8; segmentBit++) {
+			if (segments & (1<<segmentBit)) {
+				DPY_PORT |= (1<<DPY_DATA);
+			} else {
+				DPY_PORT &= ~(1<<DPY_DATA);
+			}
+			_delay_us(2);
+			DPY_PORT |= (1<<DPY_CLOCK);
+			_delay_us(2);
+			DPY_PORT &= ~(1<<DPY_CLOCK);
+		}
+	}
+	DPY_PORT |= (1<<DPY_STROBE);
+	_delay_us(2);
+	DPY_PORT &= ~(1<<DPY_STROBE);
+	_delay_us(2);
+}
 
 // -----------------------------------------------------------------------------
 // Main loop for receiving and sending messages.
 
 int main(void)
 {
+	uint16_t no;
+	int8_t enc;
+	char buf[10];
 	uart_init( UART_BAUD_SELECT_DOUBLE_SPEED(UART_BAUD_RATE,F_CPU) );
-	sei();
-	uart_puts_P("CAN init");
 
-	// Initialize MCP2515
-	can_init(BITRATE_125_KBPS);
-	
-	uart_puts_P("load filters");
-	// Load filters and masks
-	can_static_filter(can_filter);
-	uart_puts_P("filters loaded");
-	
-	// Create a test messsage
-	can_t msg;
-	
-	msg.id = 0x123456;
-	msg.flags.rtr = 0;
-	msg.flags.extended = 1;
-	
-	msg.length = 4;
-	msg.data[0] = 0xde;
-	msg.data[1] = 0xad;
-	msg.data[2] = 0xbe;
-	msg.data[3] = 0xef;
-	
-	// Send the message
-	uart_puts_P("sending message");
-	can_send_message(&msg);
-	uart_puts_P("message sent");
+	encoder_init();
 
 	STEPPER_EN_PORT |= (1<<STEPPER_EN); // Disable Stepper Driver
 
@@ -188,11 +171,6 @@ int main(void)
 	DDR(STEPPER_EN_PORT) |= (1<<STEPPER_EN);
 	DDR(DPY_PORT) |= (1<<DPY_STROBE) | (1<<DPY_DATA) | (1<<DPY_CLOCK);
 
-	/*
-	TCCR1A = (1<<COM1A0); //Toggle OC1A on Compare Match.
-	TCCR1A |= (1<<WGM12); // CTC Mode
-	*/
-	//TCCR1A = (1<<COM1A1) | (1<<COM1A0); // Set OC1A on Compare Match, clear OC1A at BOTTOM (inverting mode)
 	TCCR1A = (1<<COM1A0); // Toggle OC1A on Compare Match
 
 	TCCR1A |= (1<<WGM11) | (1<<WGM10); // Fast PWM, TOP=OCR1A
@@ -205,15 +183,58 @@ int main(void)
 	//TCCR1B |= (1<<CS12); // Prescaler 256
 	//TCCR1B |= (1<<CS12) | (1<<CS10); // Prescaler 1024
 
+	sei();
+
+	uart_puts_P("CAN init");
+
+	// Initialize MCP2515
+	can_init(BITRATE_125_KBPS);
+
+
+	uart_puts_P("load filters");
+	// Load filters and masks
+	can_static_filter(can_filter);
+	uart_puts_P("filters loaded");
+
+	// Create a test messsage
+	can_t msg;
+
+	msg.id = 0x123456;
+	msg.flags.rtr = 0;
+	msg.flags.extended = 1;
+
+	msg.length = 4;
+	msg.data[0] = 0xde;
+	msg.data[1] = 0xad;
+	msg.data[2] = 0xbe;
+	msg.data[3] = 0xef;
+
+	// Send the message
+	uart_puts_P("sending message");
+	can_send_message(&msg);
+	uart_puts_P("message sent");
+
 	OCR1A = 32768;
 
+	no = 2000;
+
 	for(;;) {
+		enc = encoder_read2();
+		no += enc;
+		OCR1A = no;
+		displayNumber(no);
+
+		if (encoder_read_button()) {
+			uart_puts_P("button pressed\r\n");
+			STEPPER_EN_PORT ^= (1<<STEPPER_EN);
+		}
+
 		// Check if a new messag was received
 		if (can_check_message())
 		{
 			uart_puts_P("message received");
 			can_t msg;
-			
+
 			// Try to read the message
 			uart_puts_P("reading message");
 			if (can_get_message(&msg))
@@ -230,28 +251,13 @@ int main(void)
 					}
 				}
 				else if (msg.id == 44) {
-					for (uint8_t by=0; by<4; by++) {
-						uint8_t digit = pgm_read_byte(&sevensegment_table[msg.data[by]]);
-						for (uint8_t bi=0; bi<8; bi++) {
-							if (digit & (1<<bi)) {
-								DPY_PORT |= (1<<DPY_DATA);	
-							} else {
-								DPY_PORT &= ~(1<<DPY_DATA);
-							}
-							_delay_us(2);
-							DPY_PORT |= (1<<DPY_CLOCK);
-							_delay_us(2);
-							DPY_PORT &= ~(1<<DPY_CLOCK);
-						}
-					}
-					DPY_PORT |= (1<<DPY_STROBE);
-					_delay_us(2);
-					DPY_PORT &= ~(1<<DPY_STROBE);
-					_delay_us(2);
+					no = msg.data[0]<<8;
+					no += msg.data[1];
+					displayNumber(no);
 				}
 				// If we received a message resend it with a different id
 				msg.id += 10;
-				
+
 				// Send the new message
 				uart_puts_P("re-sendig message");
 				can_send_message(&msg);
